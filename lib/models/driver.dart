@@ -82,6 +82,14 @@ class DriverStats {
   }
 }
 
+enum DriverPersonality {
+  aggressiveAttacker,  // Loves attacking with ERS, 2-stop strategies, risks lockups
+  smoothConserver,     // Master of tyre preservation, 1-stop specialist, consistent
+  tacticalMastermind,  // Reads the race, ruthless in pit windows, high composure
+  underdogGambler,     // Bets on Safety Cars and early wet/dry gambles
+  balancedRacer,       // Standard balanced approach
+}
+
 class Driver {
   final String id;
   final String firstName;
@@ -95,6 +103,7 @@ class Driver {
   final int salaryMillions; // Annual salary in millions of $
   final int contractYearsRemaining;
   final DriverStats stats;
+  final DriverPersonality personality;
 
   const Driver({
     required this.id,
@@ -109,6 +118,7 @@ class Driver {
     required this.salaryMillions,
     required this.contractYearsRemaining,
     required this.stats,
+    this.personality = DriverPersonality.balancedRacer,
   });
 
   String get fullName => '$firstName $lastName';
@@ -126,6 +136,7 @@ class Driver {
     int? salaryMillions,
     int? contractYearsRemaining,
     DriverStats? stats,
+    DriverPersonality? personality,
   }) {
     return Driver(
       id: id ?? this.id,
@@ -140,6 +151,7 @@ class Driver {
       salaryMillions: salaryMillions ?? this.salaryMillions,
       contractYearsRemaining: contractYearsRemaining ?? this.contractYearsRemaining,
       stats: stats ?? this.stats,
+      personality: personality ?? this.personality,
     );
   }
 }

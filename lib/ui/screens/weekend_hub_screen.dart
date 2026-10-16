@@ -12,6 +12,7 @@ import '../../data/drivers_data.dart';
 import '../theme/f1_theme.dart';
 import 'race_screen.dart';
 import '../widgets/strategy_planner_view.dart';
+import '../widgets/board_objectives_card.dart';
 import '../../models/race_strategy_plan.dart';
 
 class WeekendHubScreen extends StatefulWidget {
@@ -1085,14 +1086,25 @@ class _WeekendHubScreenState extends State<WeekendHubScreen> with SingleTickerPr
 
   // --- TAB 4: MULTI-STINT RACE STRATEGY PLANNER ---
   Widget _buildRaceStrategyTab() {
-    return StrategyPlannerView(
-      circuit: widget.circuit,
-      playerTeam: widget.playerTeam,
-      initialStrategies: _selectedStrategies,
-      onConfirm: (strategies) {
-        setState(() => _selectedStrategies = strategies);
-      },
-      onLaunchRace: _launchGrandPrix,
+    return Column(
+      children: [
+        if (widget.careerController != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+            child: BoardObjectivesCard(career: widget.careerController!),
+          ),
+        Expanded(
+          child: StrategyPlannerView(
+            circuit: widget.circuit,
+            playerTeam: widget.playerTeam,
+            initialStrategies: _selectedStrategies,
+            onConfirm: (strategies) {
+              setState(() => _selectedStrategies = strategies);
+            },
+            onLaunchRace: _launchGrandPrix,
+          ),
+        ),
+      ],
     );
   }
 

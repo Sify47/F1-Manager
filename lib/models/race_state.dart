@@ -181,5 +181,8 @@ class CarTelemetry {
       driverConfidence: driverConfidence ?? this.driverConfidence,
     );
   }
+
+  bool get isInDirtyAir => intervalToAheadSeconds > 0.0 && intervalToAheadSeconds <= 1.2;
+  bool get isInSlipstream => intervalToAheadSeconds > 0.0 && intervalToAheadSeconds <= 0.8;
 }
 

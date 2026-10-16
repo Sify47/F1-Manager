@@ -18,6 +18,7 @@ import '../../models/race_strategy_plan.dart';
 import '../widgets/strategy_planner_view.dart';
 import '../../services/audio_service.dart';
 import '../../state/career_controller.dart';
+import '../../models/interactive_decision.dart';
 
 class RaceScreen extends StatelessWidget {
   final Circuit circuit;
@@ -43,6 +44,7 @@ class RaceScreen extends StatelessWidget {
         playerTeam: playerTeam,
         startingGridDriverIds: startingGridDriverIds,
         startingStrategies: startingStrategies,
+        driverMoraleMap: careerController?.driverMorale,
       ),
       child: _RaceScreenContent(
         careerController: careerController,
@@ -105,8 +107,15 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
 
       int prizeMoney = 4; // Base participation payout in millions
       final playerCars = sortedCars.where((c) => widget.playerTeam.driverIds.contains(c.driverId)).toList();
+      int? bestPos;
+      int longestStint = 0;
+      int carsFinished = 0;
+
       if (playerCars.isNotEmpty) {
-        final bestPos = playerCars.map((c) => c.position).reduce((a, b) => a < b ? a : b);
+        bestPos = playerCars.map((c) => c.position).reduce((a, b) => a < b ? a : b);
+        longestStint = playerCars.map((c) => c.lapsOnCurrentTire).reduce((a, b) => a > b ? a : b);
+        carsFinished = playerCars.where((c) => c.status != CarRaceStatus.outOfRace).length;
+
         if (bestPos == 1) {
           prizeMoney += 12;
         } else if (bestPos <= 3) {
@@ -120,6 +129,9 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
         driverPointsGained: driverPointsGained,
         constructorPointsGained: constructorPointsGained,
         prizeMoneyMillions: prizeMoney,
+        bestFinishPosition: bestPos,
+        longestStintLaps: longestStint,
+        playerCarsFinished: carsFinished,
       );
 
       widget.careerController!.advanceToNextRace();
@@ -249,80 +261,96 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
           },
           child: Scaffold(
             backgroundColor: F1Theme.carbonBlack,
-            body: SafeArea(
-              child: Column(
-                children: [
-                  // TOP HEADER BAR (Broadcast style)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: const BoxDecoration(
-                      color: F1Theme.surfaceDark,
-                      border: Border(bottom: BorderSide(color: F1Theme.surfaceBorder)),
-                    ),
-                    child: Row(
-                      children: [
-                        // Official Team Badge & Live Status (Prevents accidental exit)
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: Color(controller.playerTeam.primaryColorHex),
-                            borderRadius: BorderRadius.circular(3),
-                          ),
-                          child: Text(
-                            controller.playerTeam.shortName.toUpperCase(),
-                            style: F1Theme.f1Display(fontSize: 10, fontWeight: FontWeight.w900, italic: true),
-                          ),
+            body: Stack(
+              children: [
+                SafeArea(
+                  child: Column(
+                    children: [
+                      // TOP HEADER BAR (Broadcast style)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: const BoxDecoration(
+                          color: F1Theme.surfaceDark,
+                          border: Border(bottom: BorderSide(color: F1Theme.surfaceBorder)),
                         ),
-                        const SizedBox(width: 8),
-
-                        // Grand Prix Title & Lap
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
+                        child: Row(
                           children: [
-                            Text(
-                              controller.circuit.country.toUpperCase(),
-                              style: F1Theme.f1Display(fontSize: 11, fontWeight: FontWeight.bold),
+                            // Official Team Badge & Live Status (Prevents accidental exit)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: Color(controller.playerTeam.primaryColorHex),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                              child: Text(
+                                controller.playerTeam.shortName.toUpperCase(),
+                                style: F1Theme.f1Display(fontSize: 10, fontWeight: FontWeight.w900, italic: true),
+                              ),
                             ),
-                            Text(
-                              'LAP ${controller.currentLap}/${controller.circuit.totalLaps}',
-                              style: F1Theme.f1Display(fontSize: 11, fontWeight: FontWeight.w900, color: F1Theme.f1Red),
+                            const SizedBox(width: 8),
+
+                            // Grand Prix Title & Lap
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  controller.circuit.country.toUpperCase(),
+                                  style: F1Theme.f1Display(fontSize: 11, fontWeight: FontWeight.bold),
+                                ),
+                                Text(
+                                  'LAP ${controller.currentLap}/${controller.circuit.totalLaps}',
+                                  style: F1Theme.f1Display(fontSize: 11, fontWeight: FontWeight.w900, color: F1Theme.f1Red),
+                                ),
+                              ],
                             ),
-                          ],
-                        ),
-                        const SizedBox(width: 8),
+                            const SizedBox(width: 8),
 
-                        // Safety Car / Flag banner
-                        _buildFlagBanner(controller.safetyCarStatus, isMobile),
+                            // Safety Car / Flag banner
+                            _buildFlagBanner(controller.safetyCarStatus, isMobile),
 
-                        const Spacer(),
+                            const Spacer(),
 
-                        // Weather Radar (Compact on mobile)
-                        if (!isMobile) ...[
-                          WeatherRadarWidget(weather: weather),
-                          const SizedBox(width: 8),
-                        ],
+                            // Weather Radar (Compact on mobile)
+                            if (!isMobile) ...[
+                              WeatherRadarWidget(weather: weather),
+                              const SizedBox(width: 8),
+                            ],
 
-                        // Simulation Speed Controls (0x, 1x, 2x, 5x, 10x, 30x!)
-                        _buildSpeedControls(controller, isMobile),
-                        const SizedBox(width: 4),
+                            // Simulation Speed Controls (0x, 1x, 2x, 5x, 10x, 30x!)
+                            _buildSpeedControls(controller, isMobile),
+                            const SizedBox(width: 4),
 
-                        // Audio Mute Toggle
-                        IconButton(
-                          icon: Icon(
-                            AudioService().isMuted ? Icons.volume_off : Icons.volume_up,
-                            color: AudioService().isMuted ? Colors.redAccent : Colors.greenAccent,
-                            size: 18,
-                          ),
-                          tooltip: AudioService().isMuted ? 'Unmute F1 Audio' : 'Mute F1 Audio',
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                          onPressed: () {
-                            setState(() {
-                              AudioService().toggleMute();
-                            });
-                          },
-                        ),
+                            // Focus Mode (Simplified view) Toggle
+                            IconButton(
+                              icon: Icon(
+                                controller.isFocusMode ? Icons.filter_center_focus : Icons.filter_center_focus_outlined,
+                                color: controller.isFocusMode ? Colors.amberAccent : Colors.white70,
+                                size: 18,
+                              ),
+                              tooltip: controller.isFocusMode ? 'Focus Mode Active (Tap for Detailed)' : 'Detailed Mode (Tap for Focus Mode)',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                              onPressed: () => controller.toggleFocusMode(),
+                            ),
+                            const SizedBox(width: 4),
+
+                            // Audio Mute Toggle
+                            IconButton(
+                              icon: Icon(
+                                AudioService().isMuted ? Icons.volume_off : Icons.volume_up,
+                                color: AudioService().isMuted ? Colors.redAccent : Colors.greenAccent,
+                                size: 18,
+                              ),
+                              tooltip: AudioService().isMuted ? 'Unmute F1 Audio' : 'Mute F1 Audio',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                              onPressed: () {
+                                setState(() {
+                                  AudioService().toggleMute();
+                                });
+                              },
+                            ),
                         const SizedBox(width: 4),
 
                         // Protected Abandon / Exit Button
@@ -419,17 +447,17 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                                     const SizedBox(height: 6),
 
                                     // Dedicated Broadcast Race Control Ticker (Clean Lower-Third position)
-                                    if (latestBattle != null || latestIncident != null) ...[
-                                      BattleCardWidget(
-                                        battle: latestBattle,
-                                        latestIncident: latestIncident,
-                                      ),
+                                    if (!controller.isFocusMode) ...[
+                                      if (latestBattle != null || latestIncident != null) ...[
+                                        BattleCardWidget(
+                                          battle: latestBattle,
+                                          latestIncident: latestIncident,
+                                        ),
+                                        const SizedBox(height: 6),
+                                      ],
+                                      UndercutWidget(prediction: undercutPred),
                                       const SizedBox(height: 6),
                                     ],
-
-                                    // Undercut Predictor
-                                    UndercutWidget(prediction: undercutPred),
-                                    const SizedBox(height: 6),
 
                                     // Pit Wall Controls
                                     DriverCommandDockWidget(
@@ -445,6 +473,7 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                                       onPitOrder: (id, tire) => controller.orderPitStop(id, tire),
                                       onToggleAutoStrategy: (id, auto) => controller.toggleAutoStrategy(id, auto),
                                       onOpenStrategyPlanner: () => _showLiveStrategySheet(context, controller),
+                                      onTeamOrder: (order) => controller.issueTeamOrder(order),
                                     ),
                                   ],
                                 ),
@@ -496,16 +525,17 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                                       const SizedBox(height: 6),
 
                                       // Broadcast Lower-Third Ticker
-                                      if (latestBattle != null || latestIncident != null) ...[
-                                        BattleCardWidget(
-                                          battle: latestBattle,
-                                          latestIncident: latestIncident,
-                                        ),
+                                      if (!controller.isFocusMode) ...[
+                                        if (latestBattle != null || latestIncident != null) ...[
+                                          BattleCardWidget(
+                                            battle: latestBattle,
+                                            latestIncident: latestIncident,
+                                          ),
+                                          const SizedBox(height: 6),
+                                        ],
+                                        UndercutWidget(prediction: undercutPred),
                                         const SizedBox(height: 6),
                                       ],
-
-                                      UndercutWidget(prediction: undercutPred),
-                                      const SizedBox(height: 6),
 
                                       DriverCommandDockWidget(
                                         driver1: controller.playerDriver1,
@@ -520,6 +550,7 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                                         onPitOrder: (id, tire) => controller.orderPitStop(id, tire),
                                         onToggleAutoStrategy: (id, auto) => controller.toggleAutoStrategy(id, auto),
                                         onOpenStrategyPlanner: () => _showLiveStrategySheet(context, controller),
+                                        onTeamOrder: (order) => controller.issueTeamOrder(order),
                                       ),
                                     ],
                                   ),
@@ -531,8 +562,12 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                 ],
               ),
             ),
-          ),
-        );
+            if (controller.pendingDecision != null)
+              _buildInteractiveDecisionOverlay(context, controller, controller.pendingDecision!),
+          ],
+        ),
+      ),
+    );
       },
     );
   }
@@ -694,12 +729,30 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
     final p2 = cars.length > 1 ? DriversData.getDriverById(cars[1].driverId) : null;
     final p3 = cars.length > 2 ? DriversData.getDriverById(cars[2].driverId) : null;
 
-    final bestPos = controller.playerCar1?.position ?? 10;
+    final pCars = controller.cars.where((c) => controller.playerTeam.driverIds.contains(c.driverId)).toList();
+    final hadDnf = pCars.any((c) => c.status == CarRaceStatus.outOfRace);
+    final hadConflict = controller.eventsHistory.any((e) => e.title.contains('TEAM ORDER') || e.title.contains('DEFIES'));
+    final hadDelay = controller.eventsHistory.any((e) => e.title.contains('SLOW PIT STOP') || e.title.contains('PIT CREW'));
+    final achievedObjectives = widget.careerController?.currentObjectives.any((o) => o.isAchieved) ?? false;
+
+    final bestPos = pCars.isNotEmpty
+        ? pCars.map((c) => c.position).reduce((a, b) => a < b ? a : b)
+        : (controller.playerCar1?.position ?? 10);
+
     final questions = PaddockPoliticsEngine.generatePostRaceQuestions(
       teamName: controller.playerTeam.name,
-      driver1LastName: controller.playerDriver1?.lastName ?? 'Driver',
+      driver1LastName: controller.playerDriver1?.lastName ?? 'Driver 1',
+      driver2LastName: controller.playerDriver2?.lastName ?? 'Driver 2',
+      driver1Id: controller.playerDriver1?.id,
+      driver2Id: controller.playerDriver2?.id,
       bestFinishPosition: bestPos,
+      hadMechanicalDnf: hadDnf,
+      hadTeammateConflict: hadConflict,
+      hadPitDelay: hadDelay,
+      achievedBoardObjectives: achievedObjectives,
     );
+
+    final Map<String, int> answeredChoices = {};
 
     showModalBottomSheet(
       context: context,
@@ -712,7 +765,7 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
         return StatefulBuilder(
           builder: (ctx, setModalState) {
             return Container(
-              height: MediaQuery.of(ctx).size.height * 0.88,
+              height: MediaQuery.of(ctx).size.height * 0.90,
               padding: const EdgeInsets.all(16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -720,9 +773,15 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'PODIUM CEREMONY & PRESS DESK',
-                        style: F1Theme.f1Display(fontSize: 14, fontWeight: FontWeight.w900),
+                      Row(
+                        children: [
+                          const Icon(Icons.mic_external_on, color: F1Theme.f1Red, size: 20),
+                          const SizedBox(width: 8),
+                          Text(
+                            'PADDOCK MEDIA CENTRE & DRIVER MORALE',
+                            style: F1Theme.f1Display(fontSize: 14, fontWeight: FontWeight.w900),
+                          ),
+                        ],
                       ),
                       IconButton(
                         icon: const Icon(Icons.close, color: Colors.grey, size: 20),
@@ -737,7 +796,7 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // PODIUM STEPS
+                          // PODIUM CEREMONY STEPS
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                             crossAxisAlignment: CrossAxisAlignment.end,
@@ -750,21 +809,17 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                               _buildPodiumStep('P3 🥉', p3?.fullName ?? 'P3', 15, 55, const Color(0xFFCD7F32)),
                             ],
                           ),
-                          const SizedBox(height: 20),
+                          const SizedBox(height: 16),
                           const Divider(color: F1Theme.surfaceBorder),
 
-                          // POST-RACE PRESS CONFERENCE
-                          Text('POST-RACE PRESS CONFERENCE (DRIVE TO SURVIVE)',
-                              style: F1Theme.f1Display(fontSize: 11, color: F1Theme.f1Red)),
-                          const SizedBox(height: 10),
-
-                          ...questions.map((q) {
-                            return Container(
+                          // LIVE DRIVER MORALE & BOARD CONFIDENCE HUD
+                          if (widget.careerController != null) ...[
+                            Container(
                               margin: const EdgeInsets.only(bottom: 12),
-                              padding: const EdgeInsets.all(12),
+                              padding: const EdgeInsets.all(10),
                               decoration: BoxDecoration(
                                 color: F1Theme.carbonBlack,
-                                borderRadius: BorderRadius.circular(6),
+                                borderRadius: BorderRadius.circular(8),
                                 border: Border.all(color: F1Theme.surfaceBorder),
                               ),
                               child: Column(
@@ -772,42 +827,242 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
                                 children: [
                                   Row(
                                     children: [
-                                      const Icon(Icons.mic, size: 14, color: Colors.amber),
+                                      const Icon(Icons.psychology, size: 14, color: Colors.cyanAccent),
                                       const SizedBox(width: 6),
-                                      Text('${q.journalistName} (${q.mediaOutlet})',
-                                          style: F1Theme.f1Display(fontSize: 10, color: Colors.amber)),
+                                      Text(
+                                        'TEAM INTERNAL PSYCHOLOGY & STAKEHOLDERS',
+                                        style: F1Theme.f1Display(
+                                          fontSize: 10,
+                                          color: Colors.cyanAccent,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      Text(
+                                        'CAP: \$${widget.careerController!.playerTeam.budgetMillions}M',
+                                        style: F1Theme.f1Mono(fontSize: 10, color: Colors.greenAccent, fontWeight: FontWeight.bold),
+                                      ),
                                     ],
                                   ),
-                                  const SizedBox(height: 4),
-                                  Text(q.questionText, style: F1Theme.f1Body(fontSize: 11, fontWeight: FontWeight.bold)),
                                   const SizedBox(height: 8),
-                                  ...q.options.map((opt) {
-                                    return Padding(
-                                      padding: const EdgeInsets.only(bottom: 6),
-                                      child: OutlinedButton(
-                                        style: OutlinedButton.styleFrom(
-                                          side: const BorderSide(color: F1Theme.surfaceBorder),
-                                          padding: const EdgeInsets.all(8),
-                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                                  Row(
+                                    children: [
+                                      // Driver 1 Morale Meter
+                                      Expanded(
+                                        child: _buildMoraleMeter(
+                                          controller.playerDriver1?.shortCode ?? 'D1',
+                                          widget.careerController!.getDriverMorale(controller.playerDriver1?.id ?? ''),
+                                          widget.careerController!.getDriverMoraleRating(controller.playerDriver1?.id ?? ''),
                                         ),
-                                        onPressed: () {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(
-                                              content: Text(opt.consequenceSummary, style: F1Theme.f1Body()),
-                                              backgroundColor: Colors.green[800],
-                                              duration: const Duration(seconds: 2),
-                                            ),
-                                          );
-                                        },
+                                      ),
+                                      const SizedBox(width: 6),
+                                      // Driver 2 Morale Meter
+                                      Expanded(
+                                        child: _buildMoraleMeter(
+                                          controller.playerDriver2?.shortCode ?? 'D2',
+                                          widget.careerController!.getDriverMorale(controller.playerDriver2?.id ?? ''),
+                                          widget.careerController!.getDriverMoraleRating(controller.playerDriver2?.id ?? ''),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      // Board Confidence Meter
+                                      Expanded(
+                                        child: _buildMoraleMeter(
+                                          'BOARD',
+                                          widget.careerController!.boardConfidence,
+                                          widget.careerController!.boardConfidenceRating,
+                                          isBoard: true,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+
+                          // POST-RACE PRESS CONFERENCE (DRIVE TO SURVIVE)
+                          Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: F1Theme.f1Red,
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
+                                child: Text('LIVE BROADCAST',
+                                    style: F1Theme.f1Display(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.white)),
+                              ),
+                              const SizedBox(width: 8),
+                              Text('FIA POST-RACE PRESS SCRAMBLE (DRIVE TO SURVIVE)',
+                                  style: F1Theme.f1Display(fontSize: 11, color: Colors.white70)),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+
+                          ...questions.map((q) {
+                            final isAnswered = answeredChoices.containsKey(q.id);
+                            final selectedOptIdx = answeredChoices[q.id];
+
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: F1Theme.carbonBlack,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isAnswered ? Colors.green.withValues(alpha: 0.5) : F1Theme.surfaceBorder,
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // Journalist Header
+                                  Row(
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.amber.withValues(alpha: 0.2),
+                                          borderRadius: BorderRadius.circular(3),
+                                          border: Border.all(color: Colors.amber, width: 0.8),
+                                        ),
                                         child: Row(
+                                          mainAxisSize: MainAxisSize.min,
                                           children: [
-                                            Expanded(
-                                              child: Text(
-                                                opt.text,
-                                                style: F1Theme.f1Body(fontSize: 10, color: Colors.white70),
-                                              ),
+                                            const Icon(Icons.mic, size: 11, color: Colors.amber),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              '${q.journalistName} • ${q.mediaOutlet}',
+                                              style: F1Theme.f1Display(fontSize: 9, color: Colors.amber, fontWeight: FontWeight.bold),
                                             ),
                                           ],
+                                        ),
+                                      ),
+                                      const Spacer(),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: Colors.white10,
+                                          borderRadius: BorderRadius.circular(3),
+                                        ),
+                                        child: Text(
+                                          q.topic,
+                                          style: F1Theme.f1Display(fontSize: 8, color: Colors.white60),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+
+                                  // Question Text
+                                  Text(
+                                    '"${q.questionText}"',
+                                    style: F1Theme.f1Body(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white),
+                                  ),
+                                  const SizedBox(height: 10),
+
+                                  // Choices
+                                  ...List.generate(q.options.length, (optIdx) {
+                                    final opt = q.options[optIdx];
+                                    final isThisSelected = isAnswered && selectedOptIdx == optIdx;
+                                    final isOtherSelected = isAnswered && !isThisSelected;
+
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: InkWell(
+                                        borderRadius: BorderRadius.circular(6),
+                                        onTap: isAnswered
+                                            ? null
+                                            : () {
+                                                if (widget.careerController != null) {
+                                                  widget.careerController!.applyPressAnswer(
+                                                    opt,
+                                                    targetDriverId: opt.targetDriverId,
+                                                  );
+                                                }
+                                                setModalState(() {
+                                                  answeredChoices[q.id] = optIdx;
+                                                });
+                                              },
+                                        child: Container(
+                                          padding: const EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: isThisSelected
+                                                ? Colors.green.withValues(alpha: 0.18)
+                                                : isOtherSelected
+                                                    ? Colors.white.withValues(alpha: 0.02)
+                                                    : F1Theme.surfaceDark,
+                                            borderRadius: BorderRadius.circular(6),
+                                            border: Border.all(
+                                              color: isThisSelected
+                                                  ? Colors.greenAccent
+                                                  : isOtherSelected
+                                                      ? Colors.white12
+                                                      : F1Theme.surfaceBorder,
+                                              width: isThisSelected ? 1.5 : 1,
+                                            ),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Row(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Icon(
+                                                    isThisSelected
+                                                        ? Icons.check_circle
+                                                        : isOtherSelected
+                                                            ? Icons.radio_button_unchecked
+                                                            : Icons.chat_bubble_outline,
+                                                    size: 14,
+                                                    color: isThisSelected
+                                                        ? Colors.greenAccent
+                                                        : isOtherSelected
+                                                            ? Colors.white24
+                                                            : Colors.amberAccent,
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Expanded(
+                                                    child: Text(
+                                                      opt.text,
+                                                      style: F1Theme.f1Body(
+                                                        fontSize: 11,
+                                                        color: isThisSelected
+                                                            ? Colors.white
+                                                            : isOtherSelected
+                                                                ? Colors.white38
+                                                                : Colors.white70,
+                                                        fontWeight: isThisSelected ? FontWeight.bold : FontWeight.normal,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              const SizedBox(height: 6),
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: isThisSelected
+                                                      ? Colors.greenAccent.withValues(alpha: 0.2)
+                                                      : Colors.white.withValues(alpha: 0.06),
+                                                  borderRadius: BorderRadius.circular(3),
+                                                ),
+                                                child: Text(
+                                                  opt.consequenceSummary,
+                                                  style: F1Theme.f1Mono(
+                                                    fontSize: 9,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: isThisSelected
+                                                        ? Colors.greenAccent
+                                                        : isOtherSelected
+                                                            ? Colors.white30
+                                                            : Colors.white60,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ),
                                       ),
                                     );
@@ -847,6 +1102,51 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
     );
   }
 
+  Widget _buildMoraleMeter(String label, int value, String rating, {bool isBoard = false}) {
+    Color col;
+    if (value >= 75) {
+      col = Colors.greenAccent;
+    } else if (value >= 50) {
+      col = Colors.amberAccent;
+    } else {
+      col = Colors.redAccent;
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: F1Theme.surfaceDark,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: F1Theme.surfaceBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(label, style: F1Theme.f1Display(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.white)),
+              Text('$value%', style: F1Theme.f1Mono(fontSize: 9, fontWeight: FontWeight.bold, color: col)),
+            ],
+          ),
+          const SizedBox(height: 3),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(2),
+            child: LinearProgressIndicator(
+              value: (value / 100.0).clamp(0.0, 1.0),
+              backgroundColor: Colors.white12,
+              valueColor: AlwaysStoppedAnimation<Color>(col),
+              minHeight: 4,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(rating, style: F1Theme.f1Body(fontSize: 8, color: Colors.white60), maxLines: 1, overflow: TextOverflow.ellipsis),
+        ],
+      ),
+    );
+  }
+  
+
   Widget _buildPodiumStep(String stepLabel, String driverName, int points, double height, Color color) {
     return Column(
       children: [
@@ -868,6 +1168,246 @@ class _RaceScreenContentState extends State<_RaceScreenContent> with SingleTicke
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildInteractiveDecisionOverlay(
+    BuildContext context,
+    RaceController controller,
+    InteractiveDecision decision,
+  ) {
+    return Container(
+      color: Colors.black.withValues(alpha: 0.82),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+      alignment: Alignment.center,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Container(
+          decoration: BoxDecoration(
+            color: F1Theme.surfaceDark,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: F1Theme.f1Red, width: 2),
+            boxShadow: [
+              BoxShadow(
+                color: F1Theme.f1Red.withValues(alpha: 0.4),
+                blurRadius: 28,
+                spreadRadius: 4,
+              ),
+            ],
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Top Emergency Banner
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: F1Theme.f1Red,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.flash_on, color: Colors.white, size: 14),
+                          const SizedBox(width: 4),
+                          Text(
+                            'PIT WALL CRISIS // TACTICAL PAUSE',
+                            style: F1Theme.f1Display(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Spacer(),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.white10,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        'LAP ${decision.lap} • SECTOR ${decision.sector}',
+                        style: F1Theme.f1Mono(fontSize: 10, color: Colors.amberAccent, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+
+                // Driver Radio Message Box
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: F1Theme.carbonBlack,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: F1Theme.surfaceBorder),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: F1Theme.f1Red.withValues(alpha: 0.25),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: F1Theme.f1Red),
+                        ),
+                        child: Text(
+                          decision.driverShortName,
+                          style: F1Theme.f1Display(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.radio, size: 12, color: Colors.greenAccent),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'TEAM RADIO TRANSCRIPTION',
+                                  style: F1Theme.f1Display(fontSize: 8, color: Colors.greenAccent, fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '"${decision.radioSnippet}"',
+                              style: F1Theme.f1Display(fontSize: 12, color: Colors.white, italic: true),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+
+                // Dilemma Headline & Details
+                Text(
+                  decision.headline,
+                  style: F1Theme.f1Display(fontSize: 15, fontWeight: FontWeight.w900, color: Colors.white),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  decision.situationDetail,
+                  style: F1Theme.f1Body(fontSize: 11, color: Colors.white70),
+                ),
+                const SizedBox(height: 12),
+
+                // Tactical Choice Options
+                ...decision.options.map((option) {
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: F1Theme.carbonBlack,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: F1Theme.surfaceBorder),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                option.title,
+                                style: F1Theme.f1Display(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.amberAccent),
+                              ),
+                            ),
+                            ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: F1Theme.f1Red,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              onPressed: () => controller.resolveDecision(option),
+                              child: Text(
+                                'EXECUTE CALL',
+                                style: F1Theme.f1Display(fontSize: 10, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          option.description,
+                          style: F1Theme.f1Body(fontSize: 10, color: Colors.white60),
+                        ),
+                        const SizedBox(height: 8),
+
+                        // Pros & Cons
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.green.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: Colors.green.withValues(alpha: 0.5)),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.check_circle, size: 10, color: Colors.greenAccent),
+                                    const SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text(
+                                        option.pros,
+                                        style: F1Theme.f1Body(fontSize: 9, color: Colors.greenAccent, fontWeight: FontWeight.w600),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.red.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(4),
+                                  border: Border.all(color: Colors.red.withValues(alpha: 0.5)),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.cancel, size: 10, color: Colors.redAccent),
+                                    const SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text(
+                                        option.cons,
+                                        style: F1Theme.f1Body(fontSize: 9, color: Colors.redAccent, fontWeight: FontWeight.w600),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

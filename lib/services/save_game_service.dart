@@ -10,6 +10,8 @@ class CareerSaveData {
   final Map<String, int> carStats;
   final Map<String, int> constructorPoints;
   final Map<String, int> driverPoints;
+  final Map<String, int>? driverMorale;
+  final int? boardConfidence;
   final DateTime savedAt;
 
   CareerSaveData({
@@ -19,6 +21,8 @@ class CareerSaveData {
     required this.carStats,
     required this.constructorPoints,
     required this.driverPoints,
+    this.driverMorale,
+    this.boardConfidence,
     required this.savedAt,
   });
 
@@ -29,6 +33,8 @@ class CareerSaveData {
         'carStats': carStats,
         'constructorPoints': constructorPoints,
         'driverPoints': driverPoints,
+        if (driverMorale != null) 'driverMorale': driverMorale,
+        if (boardConfidence != null) 'boardConfidence': boardConfidence,
         'savedAt': savedAt.toIso8601String(),
       };
 
@@ -40,6 +46,10 @@ class CareerSaveData {
       carStats: Map<String, int>.from(json['carStats'] as Map? ?? {}),
       constructorPoints: Map<String, int>.from(json['constructorPoints'] as Map? ?? {}),
       driverPoints: Map<String, int>.from(json['driverPoints'] as Map? ?? {}),
+      driverMorale: json['driverMorale'] != null
+          ? Map<String, int>.from(json['driverMorale'] as Map)
+          : null,
+      boardConfidence: json['boardConfidence'] as int?,
       savedAt: DateTime.tryParse(json['savedAt'] as String? ?? '') ?? DateTime.now(),
     );
   }
@@ -53,6 +63,8 @@ class SaveGameService {
     required int currentRaceIndex,
     required Map<String, ChampionshipStanding> constructorStandings,
     required Map<String, ChampionshipStanding> driverStandings,
+    Map<String, int>? driverMorale,
+    int? boardConfidence,
   }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -73,6 +85,8 @@ class SaveGameService {
         },
         constructorPoints: constructorStandings.map((k, v) => MapEntry(k, v.points)),
         driverPoints: driverStandings.map((k, v) => MapEntry(k, v.points)),
+        driverMorale: driverMorale,
+        boardConfidence: boardConfidence,
         savedAt: DateTime.now(),
       );
 

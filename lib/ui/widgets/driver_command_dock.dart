@@ -3,6 +3,7 @@ import '../../models/driver.dart';
 import '../../models/race_state.dart';
 import '../../models/tire.dart';
 import '../../models/race_strategy_plan.dart';
+import '../../models/interactive_decision.dart';
 import '../theme/f1_theme.dart';
 
 class DriverCommandDockWidget extends StatefulWidget {
@@ -18,6 +19,7 @@ class DriverCommandDockWidget extends StatefulWidget {
   final Function(String driverId, TireType nextTire) onPitOrder;
   final Function(String driverId, bool auto)? onToggleAutoStrategy;
   final VoidCallback? onOpenStrategyPlanner;
+  final Function(TeamOrderType order)? onTeamOrder;
 
   const DriverCommandDockWidget({
     super.key,
@@ -33,6 +35,7 @@ class DriverCommandDockWidget extends StatefulWidget {
     required this.onPitOrder,
     this.onToggleAutoStrategy,
     this.onOpenStrategyPlanner,
+    this.onTeamOrder,
   });
 
   @override
@@ -74,6 +77,48 @@ class _DriverCommandDockWidgetState extends State<DriverCommandDockWidget> {
                   const SizedBox(width: 6),
                   _buildDriverTab(1, widget.driver2, widget.car2),
                   const Spacer(),
+                  if (widget.onTeamOrder != null && widget.car1 != null && widget.car2 != null) ...[
+                    PopupMenuButton<TeamOrderType>(
+                      icon: const Icon(Icons.swap_calls, size: 16, color: Colors.amberAccent),
+                      tooltip: 'Team Orders (Radio Instructions)',
+                      padding: EdgeInsets.zero,
+                      color: F1Theme.surfaceDark,
+                      onSelected: (order) => widget.onTeamOrder?.call(order),
+                      itemBuilder: (ctx) => [
+                        const PopupMenuItem(
+                          value: TeamOrderType.swapPositions,
+                          child: Row(
+                            children: [
+                              Icon(Icons.swap_horiz, color: Colors.amberAccent, size: 16),
+                              SizedBox(width: 8),
+                              Text('SWAP POSITIONS', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                        const PopupMenuItem(
+                          value: TeamOrderType.holdPositions,
+                          child: Row(
+                            children: [
+                              Icon(Icons.pan_tool, color: Colors.redAccent, size: 16),
+                              SizedBox(width: 8),
+                              Text('HOLD STATIONS', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                        const PopupMenuItem(
+                          value: TeamOrderType.letTeammatesRace,
+                          child: Row(
+                            children: [
+                              Icon(Icons.flag, color: Colors.greenAccent, size: 16),
+                              SizedBox(width: 8),
+                              Text('FREE RACING', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(width: 4),
+                  ],
                   if (widget.onOpenStrategyPlanner != null) ...[
                     IconButton(
                       icon: const Icon(Icons.tune, size: 16, color: Colors.white70),
@@ -105,7 +150,11 @@ class _DriverCommandDockWidgetState extends State<DriverCommandDockWidget> {
 
               // Active Strategy & Target Pit Window Strip
               _buildStrategyBanner(activeDriver, activeCar, activeStrategy),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+
+              // Real-Time Thermal & Aerodynamic Insight Badges
+              _buildPhysicsInsightBadge(activeCar),
+              const SizedBox(height: 4),
 
               // Telemetry Gauges (Responsive: 2x2 on narrow, 1x4 on wide)
               if (isNarrow)
@@ -477,6 +526,13 @@ class _DriverCommandDockWidgetState extends State<DriverCommandDockWidget> {
             );
           }).toList(),
         ),
+        const SizedBox(height: 3),
+        Text(
+          _getPaceDescription(car.paceMode),
+          style: F1Theme.f1Body(fontSize: 8, color: _getPaceColor(car.paceMode)),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
       ],
     );
   }
@@ -574,6 +630,77 @@ class _DriverCommandDockWidgetState extends State<DriverCommandDockWidget> {
       case PaceMode.attack:
         return F1Theme.f1Red;
     }
+  }
+
+  String _getPaceDescription(PaceMode mode) {
+    switch (mode) {
+      case PaceMode.conserve:
+        return '🛡️ Save tyre wear (-40%) | +1.0s laptime loss';
+      case PaceMode.balanced:
+        return '⚖️ Delta target | Standard tire wear';
+      case PaceMode.push:
+        return '⚡ Push (+0.4s lap delta) | +45% tire wear';
+      case PaceMode.attack:
+        return '🔥 Max Attack (+0.8s pace) | 2.1x wear & blister risk!';
+    }
+  }
+
+  Widget _buildPhysicsInsightBadge(CarTelemetry car) {
+    Widget? badge;
+    if (car.tireTemperature > 115) {
+      badge = _buildInsightChip(
+        icon: Icons.local_fire_department,
+        color: Colors.redAccent,
+        text: 'OVERHEATING BLISTER RISK (${car.tireTemperature.toStringAsFixed(0)}°C): Thermal grip loss!',
+      );
+    } else if (car.tireTemperature < 80) {
+      badge = _buildInsightChip(
+        icon: Icons.ac_unit,
+        color: Colors.lightBlueAccent,
+        text: 'COLD GRAINING (${car.tireTemperature.toStringAsFixed(0)}°C): Under operating temperature window!',
+      );
+    } else if (car.isInDirtyAir) {
+      badge = _buildInsightChip(
+        icon: Icons.air,
+        color: Colors.amberAccent,
+        text: 'DIRTY AIR TURBULENCE: -25% aerodynamic downforce, +35% tire degradation!',
+      );
+    } else if (car.isInSlipstream) {
+      badge = _buildInsightChip(
+        icon: Icons.bolt,
+        color: Colors.greenAccent,
+        text: 'SLIPSTREAM DRAFT: Aerodynamic high-speed tow active (-0.28s delta)!',
+      );
+    }
+
+    if (badge == null) return const SizedBox.shrink();
+    return badge;
+  }
+
+  Widget _buildInsightChip({required IconData icon, required Color color, required String text}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: color.withValues(alpha: 0.6)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: color),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              text,
+              style: F1Theme.f1Display(fontSize: 9, color: color, fontWeight: FontWeight.bold),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showPitStopDialog(BuildContext context, String driverId) {

@@ -12,6 +12,8 @@ import '../engine/pit_wall_strategy.dart';
 
 import '../models/race_strategy_plan.dart';
 
+import '../models/interactive_decision.dart';
+
 class RaceController extends ChangeNotifier {
   final Circuit circuit;
   final Team playerTeam;
@@ -19,6 +21,7 @@ class RaceController extends ChangeNotifier {
   Timer? _simTimer;
 
   int _simSpeed = 1; // 0 = paused, 1 = 1x, 2 = 2x, 5 = 5x, 10 = 10x
+  bool _isFocusMode = false;
   bool _disposed = false;
 
   RaceController({
@@ -27,20 +30,25 @@ class RaceController extends ChangeNotifier {
     List<String>? startingGridDriverIds,
     Map<String, TireType>? startingTires,
     Map<String, DriverRaceStrategy>? startingStrategies,
+    Map<String, int>? driverMoraleMap,
   }) {
     // Generate initial grid from qualifying or standard grid
     final grid = startingGridDriverIds ?? DriversData.allDrivers.map((d) => d.id).toList();
     _engine = RaceEngine(
       circuit: circuit,
       startingGridDriverIds: grid,
+      playerTeamId: playerTeam.id,
       startingTires: startingTires,
       startingStrategies: startingStrategies,
+      driverMoraleMap: driverMoraleMap,
     );
     _startTimer();
   }
 
   RaceEngine get engine => _engine;
   int get simSpeed => _simSpeed;
+  bool get isFocusMode => _isFocusMode;
+  InteractiveDecision? get pendingDecision => _engine.currentDecision;
   int get currentLap => _engine.currentLap;
   List<CarTelemetry> get cars => _engine.cars;
   SafetyCarStatus get safetyCarStatus => _engine.safetyCarStatus;
@@ -91,9 +99,29 @@ class RaceController extends ChangeNotifier {
         timer.cancel();
         return;
       }
+      if (_engine.hasPendingDecision) {
+        // Paused waiting for player tactical decision
+        notifyListeners();
+        return;
+      }
       _engine.tick(deltaSeconds);
       notifyListeners();
     });
+  }
+
+  void toggleFocusMode() {
+    _isFocusMode = !_isFocusMode;
+    notifyListeners();
+  }
+
+  void resolveDecision(DecisionOption option) {
+    _engine.resolveDecision(option);
+    notifyListeners();
+  }
+
+  void issueTeamOrder(TeamOrderType order) {
+    _engine.executeTeamOrder(order);
+    notifyListeners();
   }
 
   // Strategy commands for player

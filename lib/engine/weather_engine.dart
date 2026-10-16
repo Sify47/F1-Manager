@@ -31,6 +31,25 @@ class WeatherState {
   bool get isWet => trackWetness > 0.45;
   bool get isMonsoon => trackWetness > 0.75;
 
+  String get forecastSummaryText {
+    final rainPoints = radarForecast.where((p) => p.rainIntensity > 0.20).toList();
+    if (rainPoints.isNotEmpty) {
+      final firstPoint = rainPoints.first;
+      int mins = firstPoint.minutesFromNow;
+      int conf = (60 + (firstPoint.rainIntensity * 30)).clamp(55, 95).round();
+      if (firstPoint.rainIntensity > 0.65) {
+        return 'Heavy rain expected in ~$mins mins ($conf% confidence) • Full Wets window';
+      }
+      return 'Rain showers expected in ~$mins mins ($conf% confidence) • Ready Intermediates';
+    }
+
+    if (rainIntensity > 0.15 && radarForecast.take(5).every((p) => p.rainIntensity < 0.10)) {
+      return 'Drying line expected in ~3-5 mins (75% confidence) • Slicks crossover';
+    }
+
+    return 'Dry track expected throughout current stint • Zero rain threat';
+  }
+
   WeatherState copyWith({
     double? rainIntensity,
     double? trackWetness,

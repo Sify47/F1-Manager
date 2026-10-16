@@ -13,11 +13,13 @@ import 'weather_engine.dart';
 import 'incident_engine.dart';
 import 'strategy_generator.dart';
 import '../services/audio_service.dart';
+import '../models/interactive_decision.dart';
 
 class RaceEngine {
   final Circuit circuit;
   final WeatherEngine weatherEngine;
   final IncidentEngine incidentEngine;
+  final String? playerTeamId;
 
   List<CarTelemetry> _cars;
   int _currentLap = 1;
@@ -30,14 +32,17 @@ class RaceEngine {
   bool _isRaceFinished = false;
 
   Map<String, DriverRaceStrategy> _carStrategies = {};
-  final Map<String, int> _lastAlertLapByDriver = {};
   final Set<String> _manualPaceOverrideDrivers = {};
+  final Set<String> _triggeredDecisionKeys = {};
+  InteractiveDecision? _currentDecision;
 
   RaceEngine({
     required this.circuit,
     required List<String> startingGridDriverIds,
+    this.playerTeamId,
     Map<String, TireType>? startingTires,
     Map<String, DriverRaceStrategy>? startingStrategies,
+    Map<String, int>? driverMoraleMap,
     int? seed,
   })  : weatherEngine = WeatherEngine(
           baseRainProbability: circuit.baseRainProbability,
@@ -51,7 +56,7 @@ class RaceEngine {
       startingGridDriverIds: startingGridDriverIds,
       playerStrategies: startingStrategies,
     );
-    _initializeGrid(startingGridDriverIds, startingTires);
+    _initializeGrid(startingGridDriverIds, startingTires, driverMoraleMap);
   }
 
   List<CarTelemetry> get cars => List.unmodifiable(_cars);
@@ -63,6 +68,8 @@ class RaceEngine {
   double get elapsedRaceSeconds => _elapsedRaceSeconds;
   bool get isRaceFinished => _isRaceFinished;
   Map<String, DriverRaceStrategy> get carStrategies => Map.unmodifiable(_carStrategies);
+  InteractiveDecision? get currentDecision => _currentDecision;
+  bool get hasPendingDecision => _currentDecision != null;
 
   DriverRaceStrategy? getStrategyForDriver(String driverId) => _carStrategies[driverId];
 
@@ -76,7 +83,11 @@ class RaceEngine {
     }
   }
 
-  void _initializeGrid(List<String> startingGridDriverIds, Map<String, TireType>? startingTires) {
+  void _initializeGrid(
+    List<String> startingGridDriverIds,
+    Map<String, TireType>? startingTires, [
+    Map<String, int>? driverMoraleMap,
+  ]) {
     _cars = [];
     for (int i = 0; i < startingGridDriverIds.length; i++) {
       String driverId = startingGridDriverIds[i];
@@ -94,6 +105,12 @@ class RaceEngine {
 
       // Starting fuel: ~105-110 kg
       double startingFuel = 105.0;
+
+      double confidence = 0.90;
+      if (driverMoraleMap != null && driverMoraleMap.containsKey(driverId)) {
+        final morale = driverMoraleMap[driverId] ?? 75;
+        confidence = (0.50 + (morale / 100.0) * 0.48).clamp(0.40, 0.98);
+      }
 
       _cars.add(CarTelemetry(
         driverId: driverId,
@@ -126,7 +143,7 @@ class RaceEngine {
         boxThisLap: false,
         status: CarRaceStatus.racing,
         hasDrsAvailable: false,
-        driverConfidence: 0.90,
+        driverConfidence: confidence,
       ));
     }
   }
@@ -208,6 +225,9 @@ class RaceEngine {
       driverPaceBoost += (driver.stats.wetWeatherSkill - 85) * 0.06 * weather.trackWetness;
     }
 
+    // Driver Morale & Confidence modifier (0.90 baseline: higher confidence yields pace, lower loses pace)
+    driverPaceBoost += (car.driverConfidence - 0.90) * 0.35 * (sector.lengthKm / circuit.lengthKm);
+
     // Tire delta (wear & compound)
     double tireDelta = TireModel.calculatePaceDelta(
       compound: car.currentTire,
@@ -258,12 +278,55 @@ class RaceEngine {
     // DRS Boost if available
     double drsDelta = car.hasDrsAvailable ? -0.45 * (sector.lengthKm / circuit.lengthKm) : 0.0;
 
+    // Aerodynamic Dirty Air & Slipstream
+    bool isInDirtyAir = car.intervalToAheadSeconds > 0.0 && car.intervalToAheadSeconds < 1.6;
+    double dirtyAirDelta = 0.0;
+    if (isInDirtyAir) {
+      if (car.hasDrsAvailable) {
+        // High-speed slipstream draft on straights/DRS zones
+        dirtyAirDelta = -0.28 * (sector.lengthKm / circuit.lengthKm);
+      } else {
+        // Turbulent wake understeer in technical corners
+        dirtyAirDelta = 0.35 * (sector.lengthKm / circuit.lengthKm);
+      }
+    }
+
+    // Dynamic Tire Thermal Window (Core & Surface Temperature in Celsius)
+    double tempDelta = 0.0;
+    switch (car.paceMode) {
+      case PaceMode.conserve:
+        tempDelta -= 0.35 * deltaSeconds;
+        break;
+      case PaceMode.balanced:
+        tempDelta += (98.0 - car.tireTemperature) * 0.03 * deltaSeconds;
+        break;
+      case PaceMode.push:
+        tempDelta += 0.28 * deltaSeconds;
+        break;
+      case PaceMode.attack:
+        tempDelta += 0.58 * deltaSeconds;
+        break;
+    }
+    if (isInDirtyAir) tempDelta += 0.22 * deltaSeconds;
+    if (weather.trackTemperature > 36.0) tempDelta += 0.12 * deltaSeconds;
+    if (weather.rainIntensity > 0.15) tempDelta -= 0.65 * deltaSeconds;
+    double newTireTemp = (car.tireTemperature + tempDelta).clamp(65.0, 135.0);
+
+    // Thermal Grip Delta: Blistering (>115°C) and Cold Graining (<80°C)
+    double thermalDelta = 0.0;
+    if (newTireTemp > 115.0) {
+      thermalDelta = 0.75 * (sector.lengthKm / circuit.lengthKm);
+    } else if (newTireTemp < 80.0) {
+      thermalDelta = 0.60 * (sector.lengthKm / circuit.lengthKm);
+    }
+
     // Wing damage penalty
     double wingPenalty = car.wingDamagePercentage * 2.5 * (sector.lengthKm / circuit.lengthKm);
 
     // Safety Car speed cap
     double targetSectorTime = benchmarkSeconds - (carPaceBoost + driverPaceBoost) / 3.0 +
-        tireDelta + fuelPenalty + paceDelta + ersDelta + drsDelta + wingPenalty;
+        tireDelta + fuelPenalty + paceDelta + ersDelta + drsDelta + wingPenalty +
+        dirtyAirDelta + thermalDelta;
 
     if (_safetyCarStatus == SafetyCarStatus.virtualSafetyCar) {
       targetSectorTime *= 1.35; // 35% delta delta lap time
@@ -275,7 +338,11 @@ class RaceEngine {
     double sectorProgressIncrement = deltaSeconds / max(targetSectorTime, 5.0);
     double newSectorProgress = car.sectorProgress + sectorProgressIncrement;
 
-    // Tire Wear update for this tick
+    // Tire Wear update for this tick (boosted by dirty air turbulence and overheating)
+    double wearMultiplier = 1.0;
+    if (isInDirtyAir) wearMultiplier *= 1.35;
+    if (newTireTemp > 115.0) wearMultiplier *= 1.45;
+
     double wearDelta = TireModel.calculateSectorWear(
       compound: car.currentTire,
       asphaltAbrasiveness: circuit.asphaltAbrasiveness,
@@ -284,7 +351,7 @@ class RaceEngine {
       paceMode: car.paceMode,
       rainIntensity: weather.rainIntensity,
       sectorLengthKm: sector.lengthKm * sectorProgressIncrement,
-    );
+    ) * wearMultiplier;
     double newTireWear = (car.tireWearPercentage + wearDelta).clamp(0.0, 1.0);
 
     // Fuel Consumption (burn rate: ~1.8kg to 2.3kg per lap)
@@ -377,6 +444,7 @@ class RaceEngine {
       lastLapTime: lastLapTime,
       bestLapTime: bestLapTime,
       tireWearPercentage: newTireWear,
+      tireTemperature: newTireTemp,
       fuelRemainingKg: newFuel,
       ersBatteryPercentage: battery,
       lapsOnCurrentTire: lapsOnTire,
@@ -489,189 +557,306 @@ class RaceEngine {
     Driver? driver = DriversData.getDriverById(car.driverId);
     if (driver == null) return;
 
-    bool isAiOrAuto = strat.autoExecutePitStops;
-    int lastAlertLap = _lastAlertLapByDriver[car.driverId] ?? -1;
+    // A. Player Team Interactive Crisis Management
+    if (playerTeamId != null && car.teamId == playerTeamId) {
+      if (_currentDecision == null) {
+        _checkPlayerInteractiveCrisis(index, car, driver, weather, strat);
+      }
+      return;
+    }
 
-    // 1. Wet Weather Transition
-    if (weather.rainIntensity > 0.25 &&
-        car.currentTire.type != TireType.intermediate &&
-        car.currentTire.type != TireType.wet) {
-      TireType wetTire = weather.rainIntensity > 0.65 ? TireType.wet : TireType.intermediate;
-      if (isAiOrAuto) {
-        _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: wetTire);
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.raceEngineer,
-            text: 'Rain intensifying! Boxing this lap for ${wetTire == TireType.wet ? "Wets" : "Intermediates"}.',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
+    // B. AI Competitor 3-Tier Decision Scoring Engine
+    _evaluateAiCandidateDecisions(index, car, driver, weather, strat);
+  }
+
+  void _checkPlayerInteractiveCrisis(
+    int index,
+    CarTelemetry car,
+    Driver driver,
+    WeatherState weather,
+    DriverRaceStrategy strat,
+  ) {
+    // 1. Critical Tyre Blistering / Degradation Cliff
+    if ((car.tireWearPercentage >= 0.70 || car.tireTemperature > 118.0) && car.currentLap < circuit.totalLaps) {
+      String key = 'tyre_${car.driverId}_${car.pitStopsCount}';
+      if (!_triggeredDecisionKeys.contains(key)) {
+        _triggeredDecisionKeys.add(key);
+        TireType bestCompound = strat.nextStint?.compound ??
+            (circuit.totalLaps - car.currentLap > 12 ? TireType.hard : TireType.soft);
+
+        _currentDecision = InteractiveDecision(
+          id: 'dec_tyre_${DateTime.now().millisecondsSinceEpoch}',
+          lap: car.currentLap,
+          sector: car.currentSector,
+          driverId: car.driverId,
+          driverShortName: driver.shortCode,
+          headline: 'CRITICAL TYRE CRISIS & BLISTERING!',
+          radioSnippet: '"Vibrations are unbearable! The tyres have fallen off the cliff, zero traction!"',
+          situationDetail: 'Degradation reached ${(car.tireWearPercentage * 100).toInt()}% with core temp at ${car.tireTemperature.toStringAsFixed(0)}°C. Lap times will bleed +2.5s.',
+          type: DecisionType.tyreCrisis,
+          timestamp: DateTime.now(),
+          options: [
+            DecisionOption(
+              id: 'box_now',
+              title: 'BOX THIS LAP FOR ${bestCompound.name.toUpperCase()}',
+              description: 'Pit now to fit fresh rubber.',
+              pros: 'Eliminates blowout risk; unlocks peak grip and fastest pace.',
+              cons: 'Drops positions based on live track gap (~22s pit lane traversal).',
+              actionType: DecisionActionType.boxImmediately,
+              targetCompound: bestCompound,
+            ),
+            DecisionOption(
+              id: 'lift_coast',
+              title: 'LIFT & COAST TO COOL TYRES',
+              description: 'Instruct driver to save rubber and back off.',
+              pros: 'Cools core temperature by ~0.4°C/sec to preserve remaining tread.',
+              cons: 'Pace drops +0.8s/lap, rivals behind will close into DRS range.',
+              actionType: DecisionActionType.liftAndCoast,
+            ),
+            DecisionOption(
+              id: 'push_through',
+              title: 'STAY OUT & ATTACK (DEFEND POSITION)',
+              description: 'Gamble on staying out to keep track position.',
+              pros: 'Holds current track position on circuit.',
+              cons: '25% risk of instant puncture blowout or massive flat-spot lockup.',
+              actionType: DecisionActionType.stayOutAndPush,
+            ),
+          ],
         );
+        AudioService().playRadioBeep();
         return;
-      } else if (lastAlertLap != car.currentLap) {
-        _lastAlertLapByDriver[car.driverId] = car.currentLap;
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.chiefStrategist,
-            text: 'STRATEGY ALERT: Track is wet (${(weather.rainIntensity * 100).toInt()}% rain)! Box now for ${wetTire == TireType.wet ? "WET" : "INTERMEDIATE"} tyres!',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
-        );
       }
     }
 
-    // 2. Track Drying Transition (Crossover back to slicks)
+    // 2. Weather Transition Crisis
+    if (weather.rainIntensity > 0.25 &&
+        car.currentTire.type != TireType.intermediate &&
+        car.currentTire.type != TireType.wet) {
+      String key = 'rain_${car.driverId}_${car.currentLap}';
+      if (!_triggeredDecisionKeys.contains(key)) {
+        _triggeredDecisionKeys.add(key);
+        TireType wetCompound = weather.rainIntensity > 0.65 ? TireType.wet : TireType.intermediate;
+
+        _currentDecision = InteractiveDecision(
+          id: 'dec_rain_${DateTime.now().millisecondsSinceEpoch}',
+          lap: car.currentLap,
+          sector: car.currentSector,
+          driverId: car.driverId,
+          driverShortName: driver.shortCode,
+          headline: 'RAIN INTENSIFYING ACROSS THE CIRCUIT!',
+          radioSnippet: '"Rain is dumping across Sector 2! Standing water on kerbs, slick tyres are ice skates!"',
+          situationDetail: 'Track wetness is ${(weather.trackWetness * 100).toInt()}% with rain intensity ${(weather.rainIntensity * 100).toInt()}%. Slicks lose ~6-10s per lap.',
+          type: DecisionType.weatherGamble,
+          timestamp: DateTime.now(),
+          options: [
+            DecisionOption(
+              id: 'box_inters',
+              title: 'BOX NOW FOR ${wetCompound == TireType.wet ? "FULL WET" : "INTERMEDIATE"} TYRES',
+              description: 'Switch immediately to grooved rain rubber.',
+              pros: 'Full drainage grip: 6 to 10 seconds faster per lap in the wet.',
+              cons: 'If rain clears after 2 laps, tyres will overheat and shred on dry tarmac.',
+              actionType: DecisionActionType.boxImmediately,
+              targetCompound: wetCompound,
+            ),
+            DecisionOption(
+              id: 'stay_slicks',
+              title: 'STAY OUT ON SLICKS (WEATHER GAMBLE)',
+              description: 'Brave the rain and hope it clears soon.',
+              pros: 'Saves 24s pit stop if radar shows rain will pass quickly.',
+              cons: 'Extreme aquaplaning risk, high chance of spin into gravel.',
+              actionType: DecisionActionType.stayOutAndPush,
+            ),
+          ],
+        );
+        AudioService().playRadioBeep();
+        return;
+      }
+    }
+
+    // 3. Safety Car Cheap Pit Window
+    if (_safetyCarStatus != SafetyCarStatus.clear &&
+        car.tireWearPercentage > 0.35 &&
+        car.lapsOnCurrentTire >= 6 &&
+        car.currentLap < circuit.totalLaps - 5) {
+      String key = 'sc_${car.driverId}_$_safetyCarLapsRemaining';
+      if (!_triggeredDecisionKeys.contains(key)) {
+        _triggeredDecisionKeys.add(key);
+        TireType scCompound = strat.nextStint?.compound ?? (circuit.totalLaps - car.currentLap > 15 ? TireType.hard : TireType.soft);
+
+        _currentDecision = InteractiveDecision(
+          id: 'dec_sc_${DateTime.now().millisecondsSinceEpoch}',
+          lap: car.currentLap,
+          sector: car.currentSector,
+          driverId: car.driverId,
+          driverShortName: driver.shortCode,
+          headline: 'SAFETY CAR DEPLOYED: CHEAP PIT WINDOW!',
+          radioSnippet: '"Safety Car is out! Pack is bunching up. Pit loss delta is cut in half!"',
+          situationDetail: 'Under Safety Car, you save ~11 seconds compared to green-flag pit stops.',
+          type: DecisionType.safetyCarWindow,
+          timestamp: DateTime.now(),
+          options: [
+            DecisionOption(
+              id: 'sc_box',
+              title: 'BOX NOW FOR CHEAP STOP (${scCompound.name.toUpperCase()})',
+              description: 'Take the discounted pit stop under the safety car.',
+              pros: 'Save 11+ seconds; restart with fresh tires right behind the pack.',
+              cons: 'Concedes track position to cars that choose to stay out.',
+              actionType: DecisionActionType.boxImmediately,
+              targetCompound: scCompound,
+            ),
+            DecisionOption(
+              id: 'sc_stay',
+              title: 'STAY OUT & MAINTAIN TRACK POSITION',
+              description: 'Keep track position at the front of the queue.',
+              pros: 'Inherit track position and control the restart pace.',
+              cons: 'Will have to pit later under green-flag conditions at full time penalty.',
+              actionType: DecisionActionType.stayOutAndPush,
+            ),
+          ],
+        );
+        AudioService().playRadioBeep();
+        return;
+      }
+    }
+
+    // 4. Teammate Conflict (Driver 1 vs Driver 2 close battle)
+    final teamCars = _cars.where((c) => c.teamId == playerTeamId).toList();
+    if (teamCars.length == 2 && car.driverId == teamCars[1].driverId) {
+      teamCars.sort((a, b) => a.position.compareTo(b.position));
+      final carAhead = teamCars[0];
+      final carBehind = teamCars[1];
+      double interval = carBehind.intervalToAheadSeconds;
+
+      if (interval > 0.0 && interval < 1.3 && carBehind.paceMode == PaceMode.attack) {
+        String key = 'team_swap_${car.currentLap}';
+        if (!_triggeredDecisionKeys.contains(key)) {
+          _triggeredDecisionKeys.add(key);
+          Driver? dAhead = DriversData.getDriverById(carAhead.driverId);
+          Driver? dBehind = DriversData.getDriverById(carBehind.driverId);
+
+          _currentDecision = InteractiveDecision(
+            id: 'dec_team_${DateTime.now().millisecondsSinceEpoch}',
+            lap: car.currentLap,
+            sector: car.currentSector,
+            driverId: carBehind.driverId,
+            driverShortName: dBehind?.shortCode ?? 'DRV',
+            headline: 'TEAMMATE CONFLICT: DRIVER BEHIND IS FASTER!',
+            radioSnippet: '"${dBehind?.lastName}: I am much faster than him! He is holding me up in dirty air!"',
+            situationDetail: '${dBehind?.lastName} (P${carBehind.position}) is attacking ${dAhead?.lastName} (P${carAhead.position}) within ${interval.toStringAsFixed(1)}s.',
+            type: DecisionType.teammateConflict,
+            timestamp: DateTime.now(),
+            options: [
+              DecisionOption(
+                id: 'swap_teammates',
+                title: 'TEAM ORDER: SWAP POSITIONS',
+                description: 'Order car ahead to move aside into turn 1.',
+                pros: 'Releases faster car into clean air to hunt rivals ahead.',
+                cons: 'May anger ${dAhead?.lastName} (check ego) and lower morale.',
+                actionType: DecisionActionType.swapTeammates,
+              ),
+              DecisionOption(
+                id: 'hold_stations',
+                title: 'TEAM ORDER: HOLD STATIONS',
+                description: 'Freeze positions to protect constructor points.',
+                pros: 'Zero risk of teammate collision; guarantees solid finish.',
+                cons: 'Car behind remains stuck in dirty air with elevated tire wear.',
+                actionType: DecisionActionType.holdPositions,
+              ),
+            ],
+          );
+          AudioService().playRadioBeep();
+          return;
+        }
+      }
+    }
+  }
+
+  void _evaluateAiCandidateDecisions(
+    int index,
+    CarTelemetry car,
+    Driver driver,
+    WeatherState weather,
+    DriverRaceStrategy strat,
+  ) {
+    StintPlan? currentStint = strat.currentStint;
+    StintPlan? nextStint = strat.nextStint;
+
+    // 1. Wet Transition Check (Score: ~100-130)
+    if (weather.rainIntensity > 0.25 &&
+        car.currentTire.type != TireType.intermediate &&
+        car.currentTire.type != TireType.wet) {
+      TireType targetWet = weather.rainIntensity > 0.65 ? TireType.wet : TireType.intermediate;
+      _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: targetWet);
+      _addRadioMessage(
+        RadioMessage(
+          id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
+          driverId: car.driverId,
+          driverShortName: driver.shortCode,
+          sender: RadioSender.raceEngineer,
+          text: 'Rain intensifying! Boxing this lap for ${targetWet == TireType.wet ? "Wets" : "Inters"}.',
+          lap: car.currentLap,
+          timestamp: DateTime.now(),
+        ),
+      );
+      return;
+    }
+
+    // 2. Dry line Crossover (Score: ~90)
     if (weather.rainIntensity == 0.0 &&
         weather.trackWetness < 0.15 &&
         (car.currentTire.type == TireType.intermediate || car.currentTire.type == TireType.wet)) {
       TireType slickTire = circuit.asphaltAbrasiveness > 0.75 ? TireType.hard : TireType.medium;
-      if (isAiOrAuto) {
-        _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: slickTire);
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.raceEngineer,
-            text: 'Track has dried up. Boxing this lap for slicks (${slickTire.name.toUpperCase()}).',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
-        );
-        return;
-      } else if (lastAlertLap != car.currentLap) {
-        _lastAlertLapByDriver[car.driverId] = car.currentLap;
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.chiefStrategist,
-            text: 'DRY LINE FORMING: Crossover point reached. Box this lap for slicks!',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
-        );
-      }
+      _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: slickTire);
+      _addRadioMessage(
+        RadioMessage(
+          id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
+          driverId: car.driverId,
+          driverShortName: driver.shortCode,
+          sender: RadioSender.raceEngineer,
+          text: 'Drying line formed! Boxing this lap for ${slickTire.name.toUpperCase()}.',
+          lap: car.currentLap,
+          timestamp: DateTime.now(),
+        ),
+      );
+      return;
     }
 
-    // 3. Critical Tyre Cliff (> 72% wear)
+    // 3. Critical Tire Cliff (Score: ~95)
     if (car.tireWearPercentage >= 0.72 && car.currentLap < circuit.totalLaps) {
-      TireType nextCompound = strat.nextStint?.compound ?? (circuit.totalLaps - car.currentLap > 12 ? TireType.hard : TireType.soft);
-      if (isAiOrAuto) {
-        _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: nextCompound);
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.raceEngineer,
-            text: 'Tyres have fallen off the cliff (${(car.tireWearPercentage * 100).toInt()}% wear)! Boxing now!',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
-        );
-        return;
-      } else if (lastAlertLap != car.currentLap) {
-        _lastAlertLapByDriver[car.driverId] = car.currentLap;
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.chiefStrategist,
-            text: 'CRITICAL TYRE CLIFF: Degradation at ${(car.tireWearPercentage * 100).toInt()}%. Box this lap to protect pace!',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
-        );
-      }
+      TireType nextCompound = nextStint?.compound ?? (circuit.totalLaps - car.currentLap > 12 ? TireType.hard : TireType.soft);
+      _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: nextCompound);
+      _addRadioMessage(
+        RadioMessage(
+          id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
+          driverId: car.driverId,
+          driverShortName: driver.shortCode,
+          sender: RadioSender.raceEngineer,
+          text: 'Tires have hit the cliff (${(car.tireWearPercentage * 100).toInt()}% wear)! Boxing now!',
+          lap: car.currentLap,
+          timestamp: DateTime.now(),
+        ),
+      );
+      return;
     }
 
-    // 4. Scheduled Stint Pit Stop
-    StintPlan? currentStint = strat.currentStint;
-    StintPlan? nextStint = strat.nextStint;
+    // 4. Tactical Undercut candidate scoring
     if (currentStint != null && nextStint != null && car.currentLap < circuit.totalLaps) {
-      if (car.currentLap >= currentStint.endLap) {
-        if (isAiOrAuto) {
-          _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: nextStint.compound);
-          _addRadioMessage(
-            RadioMessage(
-              id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-              driverId: car.driverId,
-              driverShortName: driver.shortCode,
-              sender: RadioSender.raceEngineer,
-              text: 'Stint target reached. Boxing this lap for ${nextStint.compound.name.toUpperCase()}.',
-              lap: car.currentLap,
-              timestamp: DateTime.now(),
-            ),
-          );
-          return;
-        } else if (lastAlertLap != car.currentLap) {
-          _lastAlertLapByDriver[car.driverId] = car.currentLap;
-          _addRadioMessage(
-            RadioMessage(
-              id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-              driverId: car.driverId,
-              driverShortName: driver.shortCode,
-              sender: RadioSender.chiefStrategist,
-              text: 'PIT WINDOW OPEN: Target Lap ${currentStint.endLap} reached. Box this lap for ${nextStint.compound.name.toUpperCase()}!',
-              lap: car.currentLap,
-              timestamp: DateTime.now(),
-            ),
-          );
+      double undercutScore = 0.0;
+      if (car.currentLap >= currentStint.endLap - 3) {
+        if (car.intervalToAheadSeconds < 1.8 && car.intervalToAheadSeconds > 0.0) {
+          undercutScore += 50.0;
+        }
+        if (car.tireWearPercentage >= 0.42) {
+          undercutScore += 25.0;
+        }
+        if (driver.personality == DriverPersonality.tacticalMastermind) {
+          undercutScore += 30.0;
+        } else if (driver.personality == DriverPersonality.aggressiveAttacker) {
+          undercutScore += 20.0;
         }
       }
-    }
 
-    // 5. Opportunistic Safety Car / VSC Pit Stop
-    if (_safetyCarStatus != SafetyCarStatus.clear &&
-        car.tireWearPercentage > 0.38 &&
-        car.currentLap < circuit.totalLaps - 5) {
-      TireType scCompound = strat.nextStint?.compound ?? (circuit.totalLaps - car.currentLap > 15 ? TireType.hard : TireType.soft);
-      if (isAiOrAuto && car.lapsOnCurrentTire >= 8) {
-        _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: scCompound);
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.raceEngineer,
-            text: 'Safety Car deployed! Taking cheap pit stop delta!',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
-        );
-        return;
-      } else if (!isAiOrAuto && lastAlertLap != car.currentLap) {
-        _lastAlertLapByDriver[car.driverId] = car.currentLap;
-        _addRadioMessage(
-          RadioMessage(
-            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
-            driverId: car.driverId,
-            driverShortName: driver.shortCode,
-            sender: RadioSender.chiefStrategist,
-            text: 'CHEAP PIT WINDOW: Safety Car deployed. Box now to gain 10+ seconds over green flag stops!',
-            lap: car.currentLap,
-            timestamp: DateTime.now(),
-          ),
-        );
-      }
-    }
-
-    // 6. Tactical Undercut Attack (AI Smart Pit Window Trigger)
-    if (isAiOrAuto && currentStint != null && nextStint != null && car.currentLap < circuit.totalLaps) {
-      if (car.currentLap >= currentStint.endLap - 2 &&
-          car.intervalToAheadSeconds < 1.8 &&
-          car.intervalToAheadSeconds > 0.0 &&
-          car.tireWearPercentage >= 0.45) {
+      if (undercutScore >= 70.0) {
         _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: nextStint.compound);
         _eventsHistory.add(RaceEvent(
           id: 'undercut_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
@@ -698,15 +883,243 @@ class RaceEngine {
       }
     }
 
-    // 7. Dynamic AI Pace & ERS Management
-    if (isAiOrAuto && !_manualPaceOverrideDrivers.contains(car.driverId)) {
-      if (car.hasDrsAvailable && car.ersBatteryPercentage > 0.20) {
-        if (car.paceMode != PaceMode.attack) {
-          _cars[index] = car.copyWith(paceMode: PaceMode.attack, ersMode: ErsMode.overtake);
-        }
-      } else if (car.tireWearPercentage > 0.58 && car.paceMode == PaceMode.attack) {
-        _cars[index] = car.copyWith(paceMode: PaceMode.balanced, ersMode: ErsMode.balanced);
+    // 5. Opportunistic Safety Car Candidate
+    if (_safetyCarStatus != SafetyCarStatus.clear &&
+        car.lapsOnCurrentTire >= 7 &&
+        car.currentLap < circuit.totalLaps - 5) {
+      double scScore = 40.0 + (car.tireWearPercentage * 40.0);
+      if (driver.personality == DriverPersonality.underdogGambler) {
+        scScore += 30.0;
       }
+      if (scScore >= 60.0) {
+        TireType scCompound = nextStint?.compound ?? (circuit.totalLaps - car.currentLap > 15 ? TireType.hard : TireType.soft);
+        _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: scCompound);
+        _addRadioMessage(
+          RadioMessage(
+            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
+            driverId: car.driverId,
+            driverShortName: driver.shortCode,
+            sender: RadioSender.raceEngineer,
+            text: 'Safety Car deployed! Taking cheap pit stop delta!',
+            lap: car.currentLap,
+            timestamp: DateTime.now(),
+          ),
+        );
+        return;
+      }
+    }
+
+    // 6. Scheduled Stint Pit Stop
+    if (currentStint != null && nextStint != null && car.currentLap < circuit.totalLaps) {
+      int targetLap = currentStint.endLap;
+      if (driver.personality == DriverPersonality.smoothConserver && car.tireWearPercentage < 0.48) {
+        targetLap += 2; // Conserver extends stint!
+      }
+      if (car.currentLap >= targetLap) {
+        _cars[index] = car.copyWith(boxThisLap: true, nextPitTire: nextStint.compound);
+        _addRadioMessage(
+          RadioMessage(
+            id: 'rad_${DateTime.now().millisecondsSinceEpoch}_${car.driverId}',
+            driverId: car.driverId,
+            driverShortName: driver.shortCode,
+            sender: RadioSender.raceEngineer,
+            text: 'Stint target reached. Boxing this lap for ${nextStint.compound.name.toUpperCase()}.',
+            lap: car.currentLap,
+            timestamp: DateTime.now(),
+          ),
+        );
+        return;
+      }
+    }
+
+    // 7. Dynamic AI Pace & ERS Management (Personality-driven)
+    if (!_manualPaceOverrideDrivers.contains(car.driverId)) {
+      if (car.hasDrsAvailable && car.ersBatteryPercentage > 0.25 && car.tireTemperature < 112.0) {
+        if (driver.personality == DriverPersonality.aggressiveAttacker || car.ersBatteryPercentage > 0.50) {
+          if (car.paceMode != PaceMode.attack) {
+            _cars[index] = car.copyWith(paceMode: PaceMode.attack, ersMode: ErsMode.overtake);
+          }
+        }
+      } else if (car.tireWearPercentage > 0.58 || car.tireTemperature > 114.0) {
+        if (car.paceMode == PaceMode.attack) {
+          _cars[index] = car.copyWith(
+            paceMode: driver.personality == DriverPersonality.smoothConserver ? PaceMode.conserve : PaceMode.balanced,
+            ersMode: ErsMode.balanced,
+          );
+        }
+      }
+    }
+  }
+
+  void resolveDecision(DecisionOption option) {
+    if (_currentDecision == null) return;
+    final dec = _currentDecision!;
+    _currentDecision = null;
+
+    final carIdx = _cars.indexWhere((c) => c.driverId == dec.driverId);
+    if (carIdx == -1) return;
+    CarTelemetry car = _cars[carIdx];
+    Driver? driver = DriversData.getDriverById(car.driverId);
+
+    switch (option.actionType) {
+      case DecisionActionType.boxImmediately:
+        orderPitStop(car.driverId, option.targetCompound ?? TireType.hard);
+        break;
+
+      case DecisionActionType.liftAndCoast:
+        setDriverPaceMode(car.driverId, PaceMode.conserve);
+        setDriverFuelMix(car.driverId, FuelMix.lean);
+        _addRadioMessage(
+          RadioMessage(
+            id: 'rad_resp_${DateTime.now().millisecondsSinceEpoch}',
+            driverId: car.driverId,
+            driverShortName: driver?.shortCode ?? 'DRV',
+            sender: RadioSender.driver,
+            text: 'Copy, lifting and coasting into turn 1 to manage tyre temperatures.',
+            lap: _currentLap,
+            timestamp: DateTime.now(),
+          ),
+        );
+        break;
+
+      case DecisionActionType.stayOutAndPush:
+        setDriverPaceMode(car.driverId, PaceMode.attack);
+        if (Random().nextDouble() < 0.25) {
+          _eventsHistory.add(
+            RaceEvent(
+              id: 'flat_${DateTime.now().millisecondsSinceEpoch}',
+              lap: _currentLap,
+              sector: car.currentSector,
+              title: '⚠️ TYRE FLAT-SPOT & LOCKUP!',
+              description: '${driver?.lastName ?? "Driver"} locked up aggressively pushing on worn rubber! Massive vibrations.',
+              severity: EventSeverity.warning,
+              driverId: car.driverId,
+              timestamp: DateTime.now(),
+            ),
+          );
+        }
+        _addRadioMessage(
+          RadioMessage(
+            id: 'rad_push_${DateTime.now().millisecondsSinceEpoch}',
+            driverId: car.driverId,
+            driverShortName: driver?.shortCode ?? 'DRV',
+            sender: RadioSender.driver,
+            text: 'Understood, staying out to defend track position. Giving it everything!',
+            lap: _currentLap,
+            timestamp: DateTime.now(),
+          ),
+        );
+        break;
+
+      case DecisionActionType.swapTeammates:
+        executeTeamOrder(TeamOrderType.swapPositions);
+        break;
+
+      case DecisionActionType.holdPositions:
+        executeTeamOrder(TeamOrderType.holdPositions);
+        break;
+
+      case DecisionActionType.attackWithErs:
+        setDriverPaceMode(car.driverId, PaceMode.attack);
+        setDriverErsMode(car.driverId, ErsMode.overtake);
+        break;
+
+      case DecisionActionType.defendAggressive:
+        setDriverPaceMode(car.driverId, PaceMode.push);
+        setDriverErsMode(car.driverId, ErsMode.deploy);
+        break;
+    }
+  }
+
+  void executeTeamOrder(TeamOrderType order) {
+    if (playerTeamId == null) return;
+    final teamCars = _cars.where((c) => c.teamId == playerTeamId).toList();
+    if (teamCars.length < 2) return;
+
+    teamCars.sort((a, b) => a.position.compareTo(b.position));
+    final carAhead = teamCars[0];
+    final carBehind = teamCars[1];
+
+    Driver? driverAhead = DriversData.getDriverById(carAhead.driverId);
+    Driver? driverBehind = DriversData.getDriverById(carBehind.driverId);
+
+    if (order == TeamOrderType.swapPositions) {
+      int ego = driverAhead?.stats.ego ?? 70;
+      bool willDefy = ego > 88 && Random().nextDouble() < 0.35;
+
+      if (willDefy) {
+        _addRadioMessage(
+          RadioMessage(
+            id: 'rad_defy_${DateTime.now().millisecondsSinceEpoch}',
+            driverId: carAhead.driverId,
+            driverShortName: driverAhead?.shortCode ?? 'DRV',
+            sender: RadioSender.driver,
+            text: 'Negative, negative! I have the pace, tell him to close the gap on merit!',
+            lap: _currentLap,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _eventsHistory.add(
+          RaceEvent(
+            id: 'defy_${DateTime.now().millisecondsSinceEpoch}',
+            lap: _currentLap,
+            sector: carAhead.currentSector,
+            title: '📻 TEAM ORDER DEFIED!',
+            description: '${driverAhead?.lastName} refused team order to let ${driverBehind?.lastName} through!',
+            severity: EventSeverity.warning,
+            driverId: carAhead.driverId,
+            timestamp: DateTime.now(),
+          ),
+        );
+      } else {
+        int idxAhead = _cars.indexWhere((c) => c.driverId == carAhead.driverId);
+        int idxBehind = _cars.indexWhere((c) => c.driverId == carBehind.driverId);
+
+        if (idxAhead != -1 && idxBehind != -1) {
+          double tempDist = _cars[idxAhead].trackDistanceTravelledKm;
+          _cars[idxAhead] = _cars[idxAhead].copyWith(trackDistanceTravelledKm: _cars[idxBehind].trackDistanceTravelledKm);
+          _cars[idxBehind] = _cars[idxBehind].copyWith(trackDistanceTravelledKm: tempDist + 0.02);
+          _updateStandings();
+
+          _addRadioMessage(
+            RadioMessage(
+              id: 'rad_swap_${DateTime.now().millisecondsSinceEpoch}',
+              driverId: carAhead.driverId,
+              driverShortName: driverAhead?.shortCode ?? 'DRV',
+              sender: RadioSender.driver,
+              text: 'Understood. Letting ${driverBehind?.shortCode ?? "teammate"} by into turn 1.',
+              lap: _currentLap,
+              timestamp: DateTime.now(),
+            ),
+          );
+          _eventsHistory.add(
+            RaceEvent(
+              id: 'swap_${DateTime.now().millisecondsSinceEpoch}',
+              lap: _currentLap,
+              sector: carAhead.currentSector,
+              title: '🔀 TEAM ORDER: POSITION SWAP',
+              description: '${driverAhead?.lastName} moves aside to allow ${driverBehind?.lastName} through.',
+              severity: EventSeverity.good,
+              driverId: carBehind.driverId,
+              timestamp: DateTime.now(),
+            ),
+          );
+        }
+      }
+    } else if (order == TeamOrderType.holdPositions) {
+      setDriverPaceMode(carAhead.driverId, PaceMode.balanced);
+      setDriverPaceMode(carBehind.driverId, PaceMode.balanced);
+      _addRadioMessage(
+        RadioMessage(
+          id: 'rad_hold_${DateTime.now().millisecondsSinceEpoch}',
+          driverId: carBehind.driverId,
+          driverShortName: driverBehind?.shortCode ?? 'DRV',
+          sender: RadioSender.driver,
+          text: 'Copy that. Holding station, bringing the cars home.',
+          lap: _currentLap,
+          timestamp: DateTime.now(),
+        ),
+      );
     }
   }
 

@@ -7,7 +7,8 @@ import '../../data/drivers_data.dart';
 import '../../state/career_controller.dart';
 import '../theme/f1_theme.dart';
 import 'weekend_hub_screen.dart';
-
+import '../widgets/rd_factory_view.dart';
+import '../widgets/board_objectives_card.dart';
 import '../../services/save_game_service.dart';
 
 class CareerDashboardScreen extends StatelessWidget {
@@ -108,6 +109,8 @@ class _CareerDashboardContent extends StatelessWidget {
                       children: [
                         _buildNextRaceCard(context, currentCircuit, team, career),
                         const SizedBox(height: 12),
+                        BoardObjectivesCard(career: career),
+                        const SizedBox(height: 12),
                         _buildDriversCard(team),
                         const SizedBox(height: 12),
                         _buildRdDepartmentCard(context, career, team),
@@ -124,6 +127,8 @@ class _CareerDashboardContent extends StatelessWidget {
                           child: Column(
                             children: [
                               _buildNextRaceCard(context, currentCircuit, team, career),
+                              const SizedBox(height: 14),
+                              BoardObjectivesCard(career: career),
                               const SizedBox(height: 14),
                               _buildDriversCard(team),
                             ],
@@ -316,137 +321,7 @@ class _CareerDashboardContent extends StatelessWidget {
   }
 
   Widget _buildRdDepartmentCard(BuildContext context, CareerController career, Team team) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: F1Theme.surfaceDark,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: F1Theme.surfaceBorder),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(
-                'R&D FACTORY UPGRADES',
-                style: F1Theme.f1Display(fontSize: 10, color: Colors.grey),
-              ),
-              Text(
-                'CAR OVR: ${team.car.overallRating}',
-                style: F1Theme.f1Mono(fontSize: 11, color: F1Theme.drsGreen),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _buildUpgradeRow(
-            title: 'Aerodynamics Downforce',
-            description: 'Decreases cornering lap times across fast and medium corners.',
-            cost: 8,
-            currentLevel: team.car.highSpeedDownforce,
-            onUpgrade: () {
-              bool ok = career.upgradeCarAero();
-              if (!ok) _showNotEnoughFunds(context);
-            },
-          ),
-          const SizedBox(height: 8),
-          _buildUpgradeRow(
-            title: 'Power Unit & ERS Battery',
-            description: 'Increases top speed, DRS overtakes, and acceleration.',
-            cost: 10,
-            currentLevel: team.car.topSpeed,
-            onUpgrade: () {
-              bool ok = career.upgradeCarEngine();
-              if (!ok) _showNotEnoughFunds(context);
-            },
-          ),
-          const SizedBox(height: 8),
-          _buildUpgradeRow(
-            title: 'Pit Crew Athletic Gym',
-            description: 'Reduces pit stop duration and lowers wheel nut human errors.',
-            cost: 5,
-            currentLevel: team.facilities.pitCrewGymLevel,
-            maxLevel: 5,
-            onUpgrade: () {
-              bool ok = career.upgradePitCrewGym();
-              if (!ok) _showNotEnoughFunds(context);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildUpgradeRow({
-    required String title,
-    required String description,
-    required int cost,
-    required int currentLevel,
-    int? maxLevel,
-    required VoidCallback onUpgrade,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: F1Theme.carbonBlack,
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: F1Theme.surfaceBorder),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        title,
-                        style: F1Theme.f1Body(fontSize: 11, fontWeight: FontWeight.bold),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                      decoration: BoxDecoration(color: Colors.white12, borderRadius: BorderRadius.circular(2)),
-                      child: Text(
-                        maxLevel != null ? 'LVL $currentLevel/$maxLevel' : '$currentLevel',
-                        style: F1Theme.f1Mono(fontSize: 8),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  description,
-                  style: F1Theme.f1Body(fontSize: 9, color: Colors.grey),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: Colors.greenAccent),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              visualDensity: VisualDensity.compact,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-            ),
-            onPressed: onUpgrade,
-            child: Text(
-              '\$${cost}M',
-              style: F1Theme.f1Mono(fontSize: 10, color: Colors.greenAccent),
-            ),
-          ),
-        ],
-      ),
-    );
+    return RdFactoryView(career: career);
   }
 
   Widget _buildChampionshipStandingsCard(CareerController career) {
@@ -485,15 +360,6 @@ class _CareerDashboardContent extends StatelessWidget {
             );
           }),
         ],
-      ),
-    );
-  }
-
-  void _showNotEnoughFunds(BuildContext context) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Not enough funds or already at max level!', style: F1Theme.f1Body()),
-        backgroundColor: F1Theme.f1Red,
       ),
     );
   }
